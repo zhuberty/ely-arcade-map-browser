@@ -10,6 +10,7 @@
 #define CUTE_TILED_IMPLEMENTATION
 #include "cute_tiled.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -117,10 +118,254 @@ static Vector2 StaggeredCellOrigin(const cute_tiled_map_t *map, int x, int y)
     float py = (float)(y * map->tileheight) * 0.5f;
     return { px, py };
 }
+// ---------------------------------------------------------------------------
+// Elevation / world model
+//
+// Logical ground coordinates (u,v) are continuous, in tile units. An integer
+// (u,v) is the CENTER of a tile. z is elevation in "levels"; one level == one
+// map->tileheight pixels of vertical screen shift.
+// ---------------------------------------------------------------------------
+
+// TODO: fill from per-tile TSX metadata (class="Surface", walkable=true). The
+// external .tsx loader above does not parse <tile> properties yet.
+struct TileDefinition
+{
+    bool isSurface = false;
+    bool walkable = false;
+};
+
+// Placeholder: until TSX metadata is parsed, every non-empty tile is a walkable surface.
+static TileDefinition GetTileDefinition(int gid)
+{
+    TileDefinition def;
+    def.isSurface = gid != 0;
+    def.walkable = gid != 0;
+    return def;
+}
+
+static bool LayerHasElevation(const cute_tiled_layer_t *layer)
+{
+    for (int i = 0; i < layer->property_count; i++)
+    {
+        const cute_tiled_property_t *p = &layer->properties[i];
+        if (p->type == CUTE_TILED_PROPERTY_INT && p->name.ptr && strcmp(p->name.ptr, "elevation") == 0)
+            return true;
+    }
+    return false;
+}
+
+static int GetLayerElevation(const cute_tiled_layer_t *layer)
+{
+    for (int i = 0; i < layer->property_count; i++)
+    {
+        const cute_tiled_property_t *p = &layer->properties[i];
+        if (p->type == CUTE_TILED_PROPERTY_INT && p->name.ptr && strcmp(p->name.ptr, "elevation") == 0)
+            return p->data.integer;
+    }
+    return 0;
+}
+
+// Projects continuous logical (u,v,z) to map pixels. Integer (u,v) lands on the
+// center of the staggered cell (StaggeredCellOrigin + half tile).
+static Vector2 WorldToMapPixel(const cute_tiled_map_t *map, Vector2 world, float z)
+{
+    float sx = (world.x - world.y) * map->tilewidth * 0.5f + map->tilewidth * 0.5f;
+    float sy = (world.x + world.y) * map->tileheight * 0.5f + map->tileheight * 0.5f;
+    sy -= z * map->tileheight;
+    return { sx, sy };
+}
+
+// Staggered cell -> logical tile coordinates (integer).
+static void TileCellToWorld(int tileX, int tileY, int *u, int *v)
+{
+    *u = tileX + (tileY + 1) / 2;
+    *v = tileY / 2 - tileX;
+}
+
+// Continuous logical position -> staggered Tiled cell (nearest tile center).
+// Does not bounds-check against the map; callers must.
+static bool WorldToTileCell(Vector2 worldPosition, int *tileX, int *tileY)
+{
+    int u = (int)floorf(worldPosition.x + 0.5f);
+    int v = (int)floorf(worldPosition.y + 0.5f);
+    int ty = u + v;
+    *tileY = ty;
+    *tileX = (u - v - (ty & 1)) / 2;   // numerator is always even
+    return true;
+}
+
+struct SurfaceHit
+{
+    bool found = false;
+    bool walkable = false;
+    float elevation = 0.0f;
+    const cute_tiled_layer_t *layer = nullptr;
+};
+
+// Highest walkable surface under worldPosition with elevation <= currentZ + stepTolerance.
+static SurfaceHit FindSurfaceBelow(const cute_tiled_map_t *map, Vector2 worldPosition,
+                                   float currentZ, float stepTolerance)
+{
+    SurfaceHit best;
+    int tx, ty;
+    if (!WorldToTileCell(worldPosition, &tx, &ty)) return best;
+    if (tx < 0 || ty < 0 || tx >= map->width || ty >= map->height) return best;
+
+    for (const cute_tiled_layer_t *l = map->layers; l; l = l->next)
+    {
+        if (!l->visible || !l->data || !l->type.ptr) continue;
+        if (strcmp(l->type.ptr, "tilelayer") != 0) continue;
+        if (!LayerHasElevation(l)) continue;
+        if (tx >= l->width || ty >= l->height) continue;
+
+        int gid = cute_tiled_unset_flags(l->data[ty * l->width + tx]);
+        if (gid == 0) continue;
+        TileDefinition def = GetTileDefinition(gid);
+        if (!def.isSurface || !def.walkable) continue;
+
+        float elev = (float)GetLayerElevation(l);
+        if (elev > currentZ + stepTolerance) continue;
+        if (!best.found || elev > best.elevation)
+        {
+            best.found = true;
+            best.walkable = true;
+            best.elevation = elev;
+            best.layer = l;
+        }
+    }
+    return best;
+}
+
+
+// ---------------------------------------------------------------------------
+// Player + simulation
+// ---------------------------------------------------------------------------
+struct Player
+{
+    Vector2 position = {};      // continuous logical world coordinates (tile units)
+    float z = 0.0f;             // elevation in levels
+    float verticalVelocity = 0.0f;
+    float moveSpeed = 3.0f;     // tiles / second
+    float jumpSpeed = 7.0f;     // levels / second
+    float radius = 5.0f;        // drawing radius (pixels)
+    bool grounded = true;
+};
+
+static const float kGravity = 18.0f;        // levels / second^2
+static const float kStepTolerance = 0.1f;   // max step-up treated as "same elevation"
+
+static Vector2 NormalizeOrZero(Vector2 v)
+{
+    float len = sqrtf(v.x * v.x + v.y * v.y);
+    return len > 0.0001f ? Vector2{ v.x / len, v.y / len } : Vector2{ 0, 0 };
+}
+
+// Places the player on the elevation-0 tile (with nothing stacked above) closest to the map center.
+static void SpawnPlayer(const cute_tiled_map_t *map, Player *player)
+{
+    int bestX = map->width / 2, bestY = map->height / 2;
+    float bestDist = 1e30f;
+    for (const cute_tiled_layer_t *l = map->layers; l; l = l->next)
+    {
+        if (!l->data || !l->type.ptr || strcmp(l->type.ptr, "tilelayer") != 0) continue;
+        if (!LayerHasElevation(l) || GetLayerElevation(l) != 0) continue;
+        for (int y = 0; y < l->height; y++)
+            for (int x = 0; x < l->width; x++)
+            {
+                if (cute_tiled_unset_flags(l->data[y * l->width + x]) == 0) continue;
+                int u, v;
+                TileCellToWorld(x, y, &u, &v);
+                SurfaceHit top = FindSurfaceBelow(map, { (float)u, (float)v }, 1000.0f, 0.0f);
+                if (!top.found || top.elevation != 0.0f) continue;
+                float dx = (float)(x - map->width / 2), dy = (float)(y - map->height / 2);
+                float d = dx * dx + dy * dy;
+                if (d < bestDist) { bestDist = d; bestX = x; bestY = y; }
+            }
+        break;
+    }
+    int u, v;
+    TileCellToWorld(bestX, bestY, &u, &v);
+    *player = Player();
+    player->position = { (float)u, (float)v };
+}
+
+static SurfaceHit UpdatePlayer(const cute_tiled_map_t *map, Player *p, float dt)
+{
+    // 1. WASD (screen space) -> logical world direction
+    Vector2 input = {};
+    if (IsKeyDown(KEY_A)) input.x -= 1;
+    if (IsKeyDown(KEY_D)) input.x += 1;
+    if (IsKeyDown(KEY_W)) input.y -= 1;
+    if (IsKeyDown(KEY_S)) input.y += 1;
+    input = NormalizeOrZero(input);
+    Vector2 dir = NormalizeOrZero({ input.x + input.y, input.y - input.x });
+
+    // Horizontal move. Stepping up onto a higher surface is disallowed for now.
+    Vector2 next = { p->position.x + dir.x * p->moveSpeed * dt, p->position.y + dir.y * p->moveSpeed * dt };
+    SurfaceHit top = FindSurfaceBelow(map, next, 1000.0f, 0.0f);
+    if (!(top.found && top.elevation > p->z + kStepTolerance))
+        p->position = next;
+
+    // 2. Jump
+    if (p->grounded && IsKeyPressed(KEY_SPACE))
+    {
+        p->verticalVelocity = p->jumpSpeed;
+        p->grounded = false;
+    }
+
+    // 3. Vertical
+    float prevZ = p->z;
+    if (!p->grounded)
+    {
+        p->verticalVelocity -= kGravity * dt;
+        p->z += p->verticalVelocity * dt;
+    }
+
+    // 4. Surface lookup (from the height we were at before this frame's motion)
+    SurfaceHit surface = FindSurfaceBelow(map, p->position, prevZ, kStepTolerance);
+    if (p->grounded)
+    {
+        if (surface.found)
+        {
+            p->z = surface.elevation;
+            p->verticalVelocity = 0.0f;
+        }
+        else
+        {
+            p->grounded = false;   // walked off an edge: fall from current z
+        }
+    }
+    else if (p->verticalVelocity <= 0.0f && surface.found && p->z <= surface.elevation)
+    {
+        p->z = surface.elevation;
+        p->verticalVelocity = 0.0f;
+        p->grounded = true;
+    }
+
+    // Fell out of the world: respawn
+    if (p->z < -10.0f)
+    {
+        SpawnPlayer(map, p);
+        surface = FindSurfaceBelow(map, p->position, p->z, kStepTolerance);
+    }
+    return surface;
+}
+
+static void DrawPlayer(const cute_tiled_map_t *map, const Player &p, const SurfaceHit &surface)
+{
+    float groundZ = surface.found ? surface.elevation : p.z;
+    Vector2 shadow = WorldToMapPixel(map, p.position, groundZ);
+    Vector2 body = WorldToMapPixel(map, p.position, p.z);
+    DrawEllipse((int)shadow.x, (int)shadow.y, p.radius, p.radius * 0.5f, Fade(BLACK, 0.4f));
+    DrawCircleV(body, p.radius, RED);
+}
+
+
 
 static void DrawTileLayer(const cute_tiled_map_t *map, const cute_tiled_layer_t *layer,
                           const TilesetInfo &ts, Rectangle view)
 {
+    float elevationPixels = (float)(GetLayerElevation(layer) * map->tileheight);
     Color tint = Fade(WHITE, layer->opacity);
     for (int y = 0; y < layer->height; y++)
     {
@@ -136,7 +381,8 @@ static void DrawTileLayer(const cute_tiled_map_t *map, const cute_tiled_layer_t 
             Vector2 o = StaggeredCellOrigin(map, x, y);
             // Tiles are bottom-aligned to their map cell
             float dx = o.x + layer->offsetx;
-            float dy = o.y + (float)(map->tileheight - ts.tileHeight) + layer->offsety;
+            float dy = o.y + (float)(map->tileheight - ts.tileHeight) + layer->offsety
+                       - elevationPixels;
 
             if (dx + ts.tileWidth < view.x || dx > view.x + view.width ||
                 dy + ts.tileHeight < view.y || dy > view.y + view.height) continue;
@@ -181,9 +427,31 @@ int main(void)
     if (map)
         camera.target = { map->width * map->tilewidth * 0.5f, map->height * map->tileheight * 0.25f };
 
+    Player player;
+    SurfaceHit surface;
+    bool followPlayer = false;
+    if (map)
+    {
+        SpawnPlayer(map, &player);
+        surface = FindSurfaceBelow(map, player.position, player.z, kStepTolerance);
+        player.z = surface.found ? surface.elevation : 0.0f;
+    }
+
     while (!WindowShouldClose())
     {
         float dt = GetFrameTime();
+        if (dt > 0.05f) dt = 0.05f;   // avoid huge steps after hitches
+        if (map && tilesetOk)
+        {
+            surface = UpdatePlayer(map, &player, dt);
+            if (IsKeyPressed(KEY_F)) followPlayer = !followPlayer;
+            if (followPlayer)
+            {
+                Vector2 t = WorldToMapPixel(map, player.position, player.z);
+                camera.target.x += (t.x - camera.target.x) * 0.1f;
+                camera.target.y += (t.y - camera.target.y) * 0.1f;
+            }
+        }
         float speed = 600.0f / camera.zoom;
         if (IsKeyDown(KEY_RIGHT)) camera.target.x += speed * dt;
         if (IsKeyDown(KEY_LEFT))  camera.target.x -= speed * dt;
@@ -209,14 +477,23 @@ int main(void)
                 if (strcmp(l->type.ptr, "tilelayer") != 0) continue;
                 DrawTileLayer(map, l, tileset, view);
             }
+            DrawPlayer(map, player, surface);
             EndMode2D();
+
+            int cx, cy;
+            WorldToTileCell(player.position, &cx, &cy);
+            DrawText(TextFormat("world %.2f, %.2f  z %.2f  vz %.2f", player.position.x, player.position.y,
+                                player.z, player.verticalVelocity), 20, 80, 20, LIGHTGRAY);
+            DrawText(TextFormat("grounded %d  surface %s %.0f  cell %d, %d", player.grounded,
+                                surface.found ? "elev" : "none", surface.elevation, cx, cy),
+                     20, 105, 20, LIGHTGRAY);
         }
         else
         {
             DrawText("Failed to load map (see log)", 100, 100, 40, RED);
         }
 
-        DrawText("Arrows: pan   Wheel: zoom   ESC: exit", 20, 20, 20, LIGHTGRAY);
+        DrawText("WASD: move  Space: jump  Arrows: pan  F: follow  Wheel: zoom  ESC: exit", 20, 20, 20, LIGHTGRAY);
         DrawFPS(20, 50);
         EndDrawing();
     }
