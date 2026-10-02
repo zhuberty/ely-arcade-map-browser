@@ -327,14 +327,14 @@ static SurfaceHit UpdatePlayer(const cute_tiled_map_t *map, Player *p, float dt)
     SurfaceHit surface = FindSurfaceBelow(map, p->position, prevZ, kStepTolerance);
     if (p->grounded)
     {
-        if (surface.found)
+        if (surface.found && surface.elevation >= p->z - kStepTolerance)
         {
             p->z = surface.elevation;
             p->verticalVelocity = 0.0f;
         }
         else
         {
-            p->grounded = false;   // walked off an edge: fall from current z
+            p->grounded = false;   // walked off an edge (or onto a lower tile): fall from current z
         }
     }
     else if (p->verticalVelocity <= 0.0f && surface.found && p->z <= surface.elevation)
