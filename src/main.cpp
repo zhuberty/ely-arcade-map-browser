@@ -8,7 +8,14 @@
 #include "arcade_input.h"
 #define CUTE_TILED_NO_EXTERNAL_TILESET_WARNING
 #define CUTE_TILED_IMPLEMENTATION
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wshadow"
+#endif
 #include "cute_tiled.h"
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 
 #include <math.h>
 #include <stdio.h>
