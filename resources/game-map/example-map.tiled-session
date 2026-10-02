@@ -8,11 +8,11 @@
             "scaleInEditor": 4
         },
         "example-map.tmx": {
-            "scale": 5.5,
-            "selectedLayer": 0,
+            "scale": 0.125,
+            "selectedLayer": 1,
             "viewCenter": {
-                "x": 50.54545454545455,
-                "y": 71.72727272727272
+                "x": 1224,
+                "y": -68
             }
         },
         "isometric.tsx": {
