@@ -166,11 +166,13 @@ static int GetLayerElevation(const cute_tiled_layer_t *layer)
 }
 
 // Projects continuous logical (u,v,z) to map pixels. Integer (u,v) lands on the
-// center of the staggered cell (StaggeredCellOrigin + half tile).
+// center of the top face of the block drawn in that staggered cell.
 static Vector2 WorldToMapPixel(const cute_tiled_map_t *map, Vector2 world, float z)
 {
     float sx = (world.x - world.y) * map->tilewidth * 0.5f + map->tilewidth * 0.5f;
-    float sy = (world.x + world.y) * map->tileheight * 0.5f + map->tileheight * 0.5f;
+    // Tiles are bottom-aligned, so a block's visible top face is centered one half
+    // tile height ABOVE the cell origin (cell origin - tileheight + tileheight/2).
+    float sy = (world.x + world.y) * map->tileheight * 0.5f - map->tileheight * 0.5f;
     sy -= z * map->tileheight;
     return { sx, sy };
 }
