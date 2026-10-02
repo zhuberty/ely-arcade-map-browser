@@ -6,6 +6,8 @@
 #include "raylib.h"
 #include "resource_dir.h"
 #include "arcade_input.h"
+#define CUTE_TILED_IMPLEMENTATION
+#include "cute_tiled.h"
 
 int main(void)
 {
