@@ -365,11 +365,16 @@ static void DrawPlayer(const cute_tiled_map_t *map, const Player &p, const Surfa
 
 
 static void DrawTileLayer(const cute_tiled_map_t *map, const cute_tiled_layer_t *layer,
-                          const TilesetInfo &ts, Rectangle view)
+                          const TilesetInfo &ts, Rectangle view,
+                          const Shader *cutShader = nullptr,
+                          int rowBegin = 0, int rowEnd = 0x7fffffff)
 {
+    if (cutShader) BeginShaderMode(*cutShader);
     float elevationPixels = (float)(GetLayerElevation(layer) * map->tileheight);
     Color tint = Fade(WHITE, layer->opacity);
-    for (int y = 0; y < layer->height; y++)
+    if (rowBegin < 0) rowBegin = 0;
+    if (rowEnd > layer->height) rowEnd = layer->height;
+    for (int y = rowBegin; y < rowEnd; y++)
     {
         for (int x = 0; x < layer->width; x++)
         {
@@ -398,6 +403,7 @@ static void DrawTileLayer(const cute_tiled_map_t *map, const cute_tiled_layer_t 
             DrawTextureRec(ts.texture, src, { dx, dy }, tint);
         }
     }
+    if (cutShader) EndShaderMode();
 }
 
 int main(void)
@@ -429,6 +435,7 @@ int main(void)
     if (map)
         camera.target = { map->width * map->tilewidth * 0.5f, map->height * map->tileheight * 0.25f };
 
+    Shader cutoutShader = LoadShader("shaders/cutout.vs", "shaders/cutout.fs");   // relative to resources/
     Player player;
     SurfaceHit surface;
     bool followPlayer = false;
@@ -473,13 +480,36 @@ int main(void)
             Rectangle view = { tl.x, tl.y, br.x - tl.x, br.y - tl.y };
 
             BeginMode2D(camera);
-            for (cute_tiled_layer_t *l = map->layers; l; l = l->next)
+            // Cutout hole around the player (map-pixel space), applied to layers above the feet.
+            Vector2 holeCenter = WorldToMapPixel(map, player.position, player.z);
+            Vector2 holeRadii = { player.radius * 3.5f, player.radius * 2.5f };
+            float holeMinAlpha = 0.0f;   // 0 = fully transparent
+            SetShaderValue(cutoutShader, GetShaderLocation(cutoutShader, "holeCenter"), &holeCenter, SHADER_UNIFORM_VEC2);
+            SetShaderValue(cutoutShader, GetShaderLocation(cutoutShader, "holeRadii"), &holeRadii, SHADER_UNIFORM_VEC2);
+            SetShaderValue(cutoutShader, GetShaderLocation(cutoutShader, "holeMinAlpha"), &holeMinAlpha, SHADER_UNIFORM_FLOAT);
+
+            // Draw order:
+            //  1. everything behind or beside the player: all rows of layers at/below the feet,
+            //     and rows up to the player's row on higher layers (drawn normally)
+            //  2. the player
+            //  3. higher layers' rows in FRONT of the player (rows after theirs), through the
+            //     cutout shader so the player shows through
+            int pcx, pcy;
+            WorldToTileCell(player.position, &pcx, &pcy);
+            for (int pass = 0; pass < 3; pass++)
             {
-                if (!l->visible || !l->data || !l->type.ptr) continue;
-                if (strcmp(l->type.ptr, "tilelayer") != 0) continue;
-                DrawTileLayer(map, l, tileset, view);
+                if (pass == 1) { DrawPlayer(map, player, surface); continue; }
+                for (cute_tiled_layer_t *l = map->layers; l; l = l->next)
+                {
+                    if (!l->visible || !l->data || !l->type.ptr) continue;
+                    if (strcmp(l->type.ptr, "tilelayer") != 0) continue;
+                    bool above = (float)GetLayerElevation(l) > player.z + 0.01f;
+                    if (pass == 0)
+                        DrawTileLayer(map, l, tileset, view, nullptr, 0, above ? pcy + 1 : 0x7fffffff);
+                    else if (above)
+                        DrawTileLayer(map, l, tileset, view, &cutoutShader, pcy + 1);
+                }
             }
-            DrawPlayer(map, player, surface);
             EndMode2D();
 
             int cx, cy;
@@ -500,6 +530,7 @@ int main(void)
         EndDrawing();
     }
 
+    UnloadShader(cutoutShader);
     if (tilesetOk) UnloadTexture(tileset.texture);
     if (map) cute_tiled_free_map(map);
     CloseWindow();
