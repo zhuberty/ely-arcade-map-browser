@@ -3,9 +3,20 @@
     "expandedProjectPaths": [
     ],
     "fileStates": {
+        "128x64_isometric_tiles.tsx": {
+            "scaleInEditor": 1
+        },
         "desert.tsx": {
             "scaleInDock": 1,
             "scaleInEditor": 4
+        },
+        "example-map.tmj": {
+            "scale": 2,
+            "selectedLayer": 4,
+            "viewCenter": {
+                "x": 413.5,
+                "y": 540.25
+            }
         },
         "example-map.tmx": {
             "scale": 0.125,
@@ -37,16 +48,20 @@
     },
     "last.exportedFilePath": "C:/Users/Zach/dev/ely-arcade/ely-arcade-games/ely-arcade-map-browser/resources/game-map",
     "last.imagePath": "C:/Users/Zach/dev/ely-arcade/ely-arcade-games/ely-arcade-map-browser/resources/game-map",
-    "map.height": 10,
+    "map.height": 32,
     "map.lastUsedExportFilter": "JSON map files (*.tmj *.json)",
     "map.lastUsedFormat": "tmx",
-    "map.width": 10,
+    "map.orientation": "3",
+    "map.tileHeight": 64,
+    "map.tileWidth": 128,
+    "map.width": 128,
     "mapScene.enableWorlds": true,
     "openFiles": [
     ],
     "project": "example-map.tiled-project",
     "property.type": "int",
     "recentFiles": [
+        "128x64_isometric_tiles.tsx",
         "isometric4.tsx",
         "isometric3.tsx",
         "isometric2.tsx",
@@ -56,10 +71,10 @@
         "my_isometric.tsx"
     ],
     "tileset.lastUsedFormat": "tsx",
-    "tileset.margin": 0,
-    "tileset.spacing": 0,
+    "tileset.margin": 1,
+    "tileset.spacing": 1,
     "tileset.tileSize": {
-        "height": 32,
-        "width": 32
+        "height": 129,
+        "width": 129
     }
 }
